@@ -1,8 +1,10 @@
 import os
 import boto3
 import watchtower, logging
-from flask import Flask
+import uuid
+from flask import Flask, request
 from flask_sqlalchemy import SQLAlchemy 
+from .log_formatter import StructuredFormatter
 
 def create_app(config_overrides=None):
     logging.basicConfig(level=logging.INFO)
@@ -13,15 +15,35 @@ def create_app(config_overrides=None):
     if config_overrides: 
         app.config.update(config_overrides)
  
+    # Send logs to AWS CloudWatch under the "taskoverflow" log group
     handler = watchtower.CloudWatchLogHandler(
             log_group_name="taskoverflow",
             boto3_client=boto3.client("logs", region_name="us-east-1")
     )
-    app.logger.addHandler(handler)
-    logging.getLogger().addHandler(handler)
-    logging.getLogger('werkzeug').addHandler(handler)
-    logging.getLogger("sqlalchemy.engine").addHandler(handler)
-    logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)
+    handler.setFormatter(StructuredFormatter())
+
+    # Attach CloudWatch handler to all relevant loggers
+    app.logger.addHandler(handler)      # Flask app logs
+    logging.getLogger().addHandler(handler) # Root logger (catches everything)
+    logging.getLogger('werkzeug').addHandler(handler)   # HTTP request logs
+    logging.getLogger("sqlalchemy.engine").addHandler(handler)  # SQL query logs
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.INFO)   # Enable SQL query logging at INFO level
+
+    # Logger for tracking individual HTTP requests
+    requests = logging.getLogger("requests")
+    requests.addHandler(handler)
+
+    # Assign a unique correlation ID to each request for tracing,
+    # and log when requests start and finish
+    @app.before_request()
+    def before_request():
+        request.environ['REQUEST_ID'] = str(uuid.uuid4())
+        requests.info("Request started")
+
+    @app.after_request
+    def after_request(response):
+        requests.info("Request finished")
+        return response
 
     # Load the models 
     from todo.models import db 
